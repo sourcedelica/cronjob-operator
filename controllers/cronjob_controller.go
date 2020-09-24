@@ -1,19 +1,3 @@
-/*
-
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package controllers
 
 import (
@@ -53,9 +37,9 @@ type Clock interface {
 }
 
 type JobsStatus struct {
-	activeJobs []*kbatchv1.Job
+	activeJobs     []*kbatchv1.Job
 	successfulJobs []*kbatchv1.Job
-	failedJobs []*kbatchv1.Job
+	failedJobs     []*kbatchv1.Job
 	mostRecentTime *time.Time
 }
 
@@ -88,7 +72,7 @@ func (r *CronJobReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// Update the status of the CronJob
-	result, err := r.updateCronJobStatus(cronJob, jobsStatus, ctx, log)
+	result, err := r.updateCronJobStatus(&cronJob, &jobsStatus, ctx, log)
 	if err != nil {
 		return result, err
 	}
@@ -111,7 +95,7 @@ func (r *CronJobReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		return ctrl.Result{}, nil
 	}
 
-	scheduledResult := ctrl.Result{RequeueAfter: nextRun.Sub(r.Now())}  // save to reuse elsewhere
+	scheduledResult := ctrl.Result{RequeueAfter: nextRun.Sub(r.Now())} // save to reuse elsewhere
 	log = log.WithValues("now", r.Now(), "next run", nextRun)
 
 	// Run a new job if it's on schedule, not past the deadline, and not blocked by concurrency policy
@@ -143,7 +127,7 @@ func (r *CronJobReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 }
 
 func (r *CronJobReconciler) prepareToRunJob(cronJob batchv1.CronJob, activeJobs []*kbatchv1.Job, missedRun time.Time,
-		scheduledResult ctrl.Result, ctx context.Context, log logr.Logger) (ctrl.Result, error, bool) {
+	scheduledResult ctrl.Result, ctx context.Context, log logr.Logger) (ctrl.Result, error, bool) {
 
 	if missedRun.IsZero() {
 		log.V(1).Info("no upcoming schedule times, sleeping until next")
@@ -171,8 +155,7 @@ func (r *CronJobReconciler) prepareToRunJob(cronJob batchv1.CronJob, activeJobs 
 	if cronJob.Spec.ConcurrencyPolicy == batchv1.ReplaceConcurrent {
 		for _, activeJob := range activeJobs {
 			// We don't care if the job was already deleted
-			if err := r.Delete(ctx, activeJob, client.PropagationPolicy(metav1.DeletePropagationBackground));
-				client.IgnoreNotFound(err) != nil {
+			if err := r.Delete(ctx, activeJob, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
 				log.Error(err, "unable to delete active job", "job", activeJob)
 				return ctrl.Result{}, err, true
 			}
@@ -207,8 +190,7 @@ func (r *CronJobReconciler) checkJobs(req ctrl.Request, ctx context.Context, log
 	var childJobs kbatchv1.JobList
 	var jobsStatus JobsStatus
 
-	if err := r.List(ctx, &childJobs, client.InNamespace(req.Namespace), client.MatchingFields{jobOwnerKey: req.Name});
-			err != nil {
+	if err := r.List(ctx, &childJobs, client.InNamespace(req.Namespace), client.MatchingFields{jobOwnerKey: req.Name}); err != nil {
 		log.Error(err, "unable to list child Jobs")
 		return jobsStatus, err
 	}
@@ -237,14 +219,19 @@ func (r *CronJobReconciler) checkJobs(req ctrl.Request, ctx context.Context, log
 		}
 	}
 
+	mostRecentTimeStr := "N/A"
+	if jobsStatus.mostRecentTime != nil {
+		mostRecentTimeStr = fmt.Sprintf("%s", jobsStatus.mostRecentTime)
+	}
+
 	log.V(1).Info("job count", "active jobs", len(jobsStatus.activeJobs),
 		"successful jobs", len(jobsStatus.successfulJobs), "failed jobs", len(jobsStatus.failedJobs),
-		"most recent time", jobsStatus.mostRecentTime)
+		"most recent time", mostRecentTimeStr)
 
 	return jobsStatus, nil
 }
 
-func (r *CronJobReconciler) updateCronJobStatus(cronJob batchv1.CronJob, jobsStatus JobsStatus, ctx context.Context,
+func (r *CronJobReconciler) updateCronJobStatus(cronJob *batchv1.CronJob, jobsStatus *JobsStatus, ctx context.Context,
 	log logr.Logger) (ctrl.Result, error) {
 
 	if jobsStatus.mostRecentTime != nil {
@@ -261,7 +248,7 @@ func (r *CronJobReconciler) updateCronJobStatus(cronJob batchv1.CronJob, jobsSta
 		cronJob.Status.Active = append(cronJob.Status.Active, *jobRef)
 	}
 
-	if err := r.Status().Update(ctx, &cronJob); err != nil {
+	if err := r.Status().Update(ctx, cronJob); err != nil {
 		log.Error(err, "unable to update CronJob status")
 		return ctrl.Result{}, err
 	}
@@ -272,7 +259,7 @@ func (r *CronJobReconciler) updateCronJobStatus(cronJob batchv1.CronJob, jobsSta
 // NB: deleting these is "best effort" - if we fail on a particular one,
 // We won't requeue just to finish the deleting
 func (r *CronJobReconciler) cleanupOldJobs(jobs []*kbatchv1.Job, limit *int32, ctx context.Context, log logr.Logger,
-										   jobDescription string) {
+	jobDescription string) {
 	if limit != nil {
 		sort.Slice(jobs, func(i, j int) bool {
 			if jobs[i].Status.StartTime == nil {
@@ -281,13 +268,13 @@ func (r *CronJobReconciler) cleanupOldJobs(jobs []*kbatchv1.Job, limit *int32, c
 			return jobs[i].Status.StartTime.Before(jobs[j].Status.StartTime)
 		})
 		for i, job := range jobs {
-			if int32(i) >= int32(len(jobs)) - *limit {
+			if int32(i) >= int32(len(jobs))-*limit {
 				break
 			}
 			if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
-				log.Error(err, "unable to delete old " + jobDescription + " job", job)
+				log.Error(err, "unable to delete old "+jobDescription+" job", job)
 			} else {
-				log.V(0).Info("deleted old " + jobDescription + " job", job)
+				log.V(0).Info("deleted old "+jobDescription+" job", job)
 			}
 		}
 	}
@@ -320,7 +307,7 @@ func getNextSchedule(cronJob *batchv1.CronJob, now time.Time) (lastMissed time.T
 	}
 
 	starts := 0
-	for t := sched.Next(earliestTime); t.After(now); t = sched.Next(t) {
+	for t := sched.Next(earliestTime); !t.After(now); t = sched.Next(t) {
 		lastMissed = t
 		// An object might miss several starts. For example, if
 		// controller gets wedged on Friday at 5:01pm when everyone has
