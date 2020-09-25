@@ -40,7 +40,7 @@ type JobsStatus struct {
 	activeJobs     []*kbatchv1.Job
 	successfulJobs []*kbatchv1.Job
 	failedJobs     []*kbatchv1.Job
-	mostRecentTime *time.Time
+	mostRecentTime time.Time
 }
 
 var (
@@ -72,7 +72,7 @@ func (r *CronJobReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// Update the status of the CronJob
-	result, err := r.updateCronJobStatus(&cronJob, &jobsStatus, ctx, log)
+	result, err := r.updateCronJobStatus(&cronJob, jobsStatus, ctx, log)
 	if err != nil {
 		return result, err
 	}
@@ -97,6 +97,11 @@ func (r *CronJobReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 
 	scheduledResult := ctrl.Result{RequeueAfter: nextRun.Sub(r.Now())} // save to reuse elsewhere
 	log = log.WithValues("now", r.Now(), "next run", nextRun)
+
+	if missedRun.IsZero() {
+		log.V(1).Info("no upcoming scheduled times, sleeping until next")
+		return scheduledResult, nil
+	}
 
 	// Run a new job if it's on schedule, not past the deadline, and not blocked by concurrency policy
 	log = log.WithValues("current run", missedRun)
@@ -174,16 +179,16 @@ func isJobFinished(job *kbatchv1.Job) (bool, kbatchv1.JobConditionType) {
 	return false, ""
 }
 
-func getScheduledTimeForJob(job *kbatchv1.Job) (*time.Time, error) {
+func getScheduledTimeForJob(job *kbatchv1.Job) (time.Time, error) {
 	timeRaw := job.Annotations[scheduledTimeAnnotation]
 	if len(timeRaw) == 0 {
-		return nil, nil
+		return time.Time{}, nil
 	}
 	timeParsed, err := time.Parse(time.RFC3339, timeRaw)
 	if err != nil {
-		return nil, err
+		return time.Time{}, err
 	}
-	return &timeParsed, nil
+	return timeParsed, nil
 }
 
 func (r *CronJobReconciler) checkJobs(req ctrl.Request, ctx context.Context, log logr.Logger) (JobsStatus, error) {
@@ -212,15 +217,15 @@ func (r *CronJobReconciler) checkJobs(req ctrl.Request, ctx context.Context, log
 			log.Error(err, "unable to parse schedule time for child job", "job", &job)
 			continue
 		}
-		if scheduledTimeForJob != nil {
-			if jobsStatus.mostRecentTime == nil || jobsStatus.mostRecentTime.Before(*scheduledTimeForJob) {
+		if !scheduledTimeForJob.IsZero() {
+			if jobsStatus.mostRecentTime.IsZero() || jobsStatus.mostRecentTime.Before(scheduledTimeForJob) {
 				jobsStatus.mostRecentTime = scheduledTimeForJob
 			}
 		}
 	}
 
 	mostRecentTimeStr := "N/A"
-	if jobsStatus.mostRecentTime != nil {
+	if !jobsStatus.mostRecentTime.IsZero() {
 		mostRecentTimeStr = fmt.Sprintf("%s", jobsStatus.mostRecentTime)
 	}
 
@@ -231,11 +236,11 @@ func (r *CronJobReconciler) checkJobs(req ctrl.Request, ctx context.Context, log
 	return jobsStatus, nil
 }
 
-func (r *CronJobReconciler) updateCronJobStatus(cronJob *batchv1.CronJob, jobsStatus *JobsStatus, ctx context.Context,
+func (r *CronJobReconciler) updateCronJobStatus(cronJob *batchv1.CronJob, jobsStatus JobsStatus, ctx context.Context,
 	log logr.Logger) (ctrl.Result, error) {
 
-	if jobsStatus.mostRecentTime != nil {
-		cronJob.Status.LastScheduleTime = &metav1.Time{Time: *jobsStatus.mostRecentTime}
+	if !jobsStatus.mostRecentTime.IsZero() {
+		cronJob.Status.LastScheduleTime = &metav1.Time{Time: jobsStatus.mostRecentTime}
 	} else {
 		cronJob.Status.LastScheduleTime = nil
 	}
@@ -260,6 +265,7 @@ func (r *CronJobReconciler) updateCronJobStatus(cronJob *batchv1.CronJob, jobsSt
 // We won't requeue just to finish the deleting
 func (r *CronJobReconciler) cleanupOldJobs(jobs []*kbatchv1.Job, limit *int32, ctx context.Context, log logr.Logger,
 	jobDescription string) {
+
 	if limit != nil {
 		sort.Slice(jobs, func(i, j int) bool {
 			if jobs[i].Status.StartTime == nil {
@@ -272,9 +278,9 @@ func (r *CronJobReconciler) cleanupOldJobs(jobs []*kbatchv1.Job, limit *int32, c
 				break
 			}
 			if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
-				log.Error(err, "unable to delete old "+jobDescription+" job", job)
+				log.Error(err, "unable to delete old "+jobDescription, "job", job)
 			} else {
-				log.V(0).Info("deleted old "+jobDescription+" job", job)
+				log.V(0).Info("deleted old "+jobDescription, "job", job)
 			}
 		}
 	}
@@ -282,6 +288,7 @@ func (r *CronJobReconciler) cleanupOldJobs(jobs []*kbatchv1.Job, limit *int32, c
 
 func getNextSchedule(cronJob *batchv1.CronJob, now time.Time) (lastMissed time.Time, next time.Time, err error) {
 	sched, err := cron.ParseStandard(cronJob.Spec.Schedule)
+
 	if err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("unparseable schedule: %q: %v", cronJob.Spec.Schedule, err)
 	}
